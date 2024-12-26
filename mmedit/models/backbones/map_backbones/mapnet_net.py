@@ -449,3 +449,76 @@ class MAPNet(BaseModule):
         elif pretrained is not None:
             raise TypeError(f'"pretrained" must be a str or None. '
                             f'But received {type(pretrained)}.')
+
+
+@BACKBONES.register_module()
+class MAPNetInference(MAPNet):
+    """
+    Pure inference code for live video
+
+    Potential memory leak issue? Can consider popping historical 'token_p' features after x number of frames
+    but currently unsure of the things to consider.
+
+    - for every frame inference there is 4.144kb stored under self.feats["token_p"]
+    - 10 minutes video, 30fps = 10 * 60 * 30 * 4.144 = 72.84375Mb
+    """
+    RGB_MEAN = [0.485, 0.456, 0.406]
+    RGB_STD = [0.229, 0.224, 0.225]
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        # Internal memory
+        self.feats = None
+        self.reset_memory()
+
+    def reset_memory(self):
+        """
+        Call on new video to clear the cache
+        """
+        self.feats = {
+            'spatial_p': [], 'decode_p': [], 'token_p': [], 'enhance_p': [],
+            'spatial_j': [], 'decode_j': [], 'pos_j': [], 'ref_j': [],
+            'stage_j': [], 'stage_t': [], 'stage_a': []
+        }
+        torch.cuda.empty_cache()
+
+    def forward(self, lq: torch.Tensor) -> torch.Tensor:
+        """
+        :param lq: Low quality tensor image, already pre-processed with lq pipeline
+        :returns: Output dehazed tensor image, in RGB format. Needs to be inverse processed with gt pipeline before viewing
+        """
+        assert not self.training, "Only for inference"
+        assert len(lq.shape) == 4, "Meant for live video feeds"
+
+        b, c, h, w = lq.shape
+
+        # print(f"\ntime: {i}")
+        img = self.check_image_size(lq)
+        img_01 = img * self.rgb_std + self.rgb_mean  # to the range of [0., 1.]
+
+        # encode
+        feat = self.extract_feat(img)  # tuple of feats, (4s, 8s, 16s, ...)
+        self.feats = self.split_feat(self.feats, feat)
+
+        # decode
+        self.feats = self.decode(self.feats)
+
+        # get output
+        feat_j = self.feats['decode_j'][-1][0]
+        out = self.upsampler(feat_j)
+        out = img_01 + out
+
+        # memory management
+        self.feats['spatial_j'].pop(0)
+        self.feats['spatial_p'].pop(0)
+        if len(self.feats['decode_j']) > max(self.num_kv_frames):
+            self.feats['decode_j'].pop(0)
+            self.feats['decode_p'].pop(0)
+            self.feats['enhance_p'].pop(0)
+            assert len(self.feats['decode_p']) == len(self.feats['decode_j'])
+        if not self.training:
+            self.feats['pos_j'].pop(0)
+            self.feats['ref_j'].pop(0)
+
+        return out[:, :, 0: h, 0: w].contiguous()
