@@ -110,9 +110,8 @@ def post_process(model_output: torch.Tensor) -> np.array:
 if __name__ == "__main__":
     video_path = "/Users/shaun/datasets/image_enhancement/dehaze/DVD/DrivingHazy/31_hazy_video.mp4"
     weights_path = "mapnet_hazeworld_40k.pth"
-    device = "mps"
-    num_input_frames = 11
-    downsize_scale = 1  # Downsize for inference
+    device = "cpu"
+    downsize_scale = 0  # Downsize for inference
 
     if device == "mps":
         os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
